@@ -56,108 +56,176 @@ from os import walk, path, remove, rename, getcwd, chdir
 
 def replaceGUIDAndToolName(theDirectory: str, theName: str) -> None:
 	"""
-	method to generate a new project GUID
+	method to generate a new project GUID (supports solutions with multiple C# projects)
 	:param theDirectory: directory to find the old tool
 	:param theName: name of the new tool
 	:return: None
 	"""
-	print("\n[*] INFO: Generating new GUID for C# project")
-	# generate a new GUID
-	newGUID = str(uuid4())
-	print(f"[*] INFO: New project GUID is {newGUID}")
+	print("\n[*] INFO: Generating new GUID(s) for C# project(s)")
 	global currentToolName
-	slnFile, csProjFile, assemblyInfoFile, currentToolName, csProjFileCount = "", "", "", "", 0
+	slnFile, currentToolName = "", ""
+	csProjFiles = []
+	assemblyInfoFiles = []
 
-	# iterate through the project to find the VS solution file and the C# project file. also grab the path to assembly info file
+	# iterate through the project to find the VS solution file and all C# project files. also grab the paths to assembly info files
 	for r, d, f in walk(theDirectory):
 		for file in f:
 			if file.endswith(".sln"):
 				slnFile = path.join(r, file)
 				currentToolName = file
 			elif file.endswith(".csproj"):
-				csProjFile = path.join(r, file)
-				csProjFileCount += 1
+				csProjFiles.append(path.join(r, file))
 			elif "AssemblyInfo.cs" in file:
-				assemblyInfoFile = path.join(r, file)
+				assemblyInfoFiles.append(path.join(r, file))
 
-	# if there is more than 1 C# project in the directory, display message and exit
-	if csProjFileCount > 1:
-		print(f"\n[-] ERROR: Currently this tool only supports having one C# project file to modify. The project directory you provided has {str(csProjFileCount)}\n")
+	if not slnFile:
+		print("\n[-] ERROR: No Visual Studio solution file (.sln) was found in the project directory\n")
 		exit(0)
 
-	print(f"[*] INFO: Changing C# project GUID in below files:\n{slnFile}\n{csProjFile}\n{assemblyInfoFile}\n")
+	if len(csProjFiles) == 0:
+		print("\n[-] ERROR: No C# project files (.csproj) were found in the project directory\n")
+		exit(0)
+
 	# capture current tool name based on VS sln file name
 	currentToolName = currentToolName.replace(".sln", "")
 
-	# initialize this to random sha256 hash so there is no match initially (sha256 hash of "test")
-	currentGUID = "f2ca1bb6c7e907d06dafe4687e579fce76b37e4e93b7605022da52e6ccc26fd2"
+	print(f"[*] INFO: Found {len(csProjFiles)} C# project file(s)")
+	print("[*] INFO: Changing C# project GUID(s) in below files:")
+	print(slnFile)
+	for csProjFile in csProjFiles:
+		print(csProjFile)
+	for assemblyInfoFile in assemblyInfoFiles:
+		print(assemblyInfoFile)
+	print("")
 
-	# change the GUID and tool name in the sln file
-	copyfile(slnFile, slnFile + "_copy")
+	# generate a new GUID for each project (keyed by project name without the .csproj extension)
+	projectNameToNewGUID = {}
+	for csProjFile in csProjFiles:
+		projectName = path.basename(csProjFile).replace(".csproj", "")
+		newGUID = str(uuid4())
+		projectNameToNewGUID[projectName] = newGUID
+		print(f"[*] INFO: New GUID for project '{projectName}' is {newGUID}")
+
+	# parse the .sln once to pull each project's existing instance GUID so we can map old -> new
+	# .sln project lines look like: Project("{Type-GUID}") = "ProjectName", "RelPath\ProjectName.csproj", "{Instance-GUID}"
+	projectNameToOldGUID = {}
 	openSLNFile = open(slnFile, 'r')
-	openCopySLNFile = open(slnFile + "_copy", "w")
 	slnLines = openSLNFile.readlines()
+	openSLNFile.close()
+
 	for line in slnLines:
+		if line.lstrip().startswith("Project(") and ".csproj" in line:
+			try:
+				lineSplit = line.split(", ")
+				projName = lineSplit[0].split("= ")[1].replace("\"", "").strip()
+				instGUID = lineSplit[2].replace("\"", "").strip()
+				projectNameToOldGUID[projName] = instGUID
+			except (IndexError, ValueError):
+				continue
 
-		# if it is the line that defines project files, then get current guid and tool name and replace
-		if "Project(" in line:
-			lineSplit = line.split(", ")
-			currentGUID = lineSplit[2].replace("\"", "").strip()
-			line = line.replace(currentGUID, "{" + newGUID + "}").replace(currentToolName, theName)
+	# build a map of oldGUID -> newGUID (both wrapped in braces, matching the .sln format)
+	oldToNewBracedGUID = {}
+	for projName, oldGUID in projectNameToOldGUID.items():
+		if projName in projectNameToNewGUID:
+			oldToNewBracedGUID[oldGUID] = "{" + projectNameToNewGUID[projName] + "}"
+
+	# change the GUID(s) and tool name in the sln file
+	copyfile(slnFile, slnFile + "_copy")
+	openCopySLNFile = open(slnFile + "_copy", "w")
+
+	for line in slnLines:
+		# if it is the line that defines project files, replace the project's instance GUID and (only for the main project) its name
+		if line.lstrip().startswith("Project(") and ".csproj" in line:
+			try:
+				lineSplit = line.split(", ")
+				projName = lineSplit[0].split("= ")[1].replace("\"", "").strip()
+				oldGUID = lineSplit[2].replace("\"", "").strip()
+				if projName in projectNameToNewGUID:
+					line = line.replace(oldGUID, "{" + projectNameToNewGUID[projName] + "}")
+				# only rename the project that shares its name with the solution (the "main" project)
+				if projName == currentToolName:
+					line = line.replace(currentToolName, theName)
+			except (IndexError, ValueError):
+				pass
 			openCopySLNFile.write(line)
-
-		# if the current guid is present, then replace it with the new guid
-		elif currentGUID in line:
-			line = line.replace(currentGUID, "{" + newGUID + "}")
-			openCopySLNFile.write(line)
-
-		# if it is a line that does not contain the current guid, then leave line alone
 		else:
+			# replace any occurrences of any old project GUIDs with their matching new ones
+			for oldGUID, newBracedGUID in oldToNewBracedGUID.items():
+				if oldGUID in line:
+					line = line.replace(oldGUID, newBracedGUID)
 			openCopySLNFile.write(line)
 
-	openSLNFile.close(), openCopySLNFile.close()
+	openCopySLNFile.close()
 	remove(slnFile), rename(f"{slnFile}_copy", slnFile)
 
-	# change the GUID and tool name in the C# proj file
-	copyfile(csProjFile, f"{csProjFile}_copy")
-	openCSProjFile = open(csProjFile, 'r')
-	openCopyCSProjFile = open(csProjFile + "_copy", "w")
-	csProjLines = openCSProjFile.readlines()
-	
-	print("\n[*] INFO: Removing PDB string in C# project file\n")
-	for line in csProjLines:
+	# change the GUID and (where applicable) tool name in each C# proj file
+	print("\n[*] INFO: Removing PDB string in C# project file(s)\n")
+	for csProjFile in csProjFiles:
+		projectName = path.basename(csProjFile).replace(".csproj", "")
 
-		# if the line has the current tool name or old guid, then replace it
-		line = line.replace(currentGUID, "{" + newGUID + "}")
+		copyfile(csProjFile, f"{csProjFile}_copy")
+		openCSProjFile = open(csProjFile, 'r')
+		openCopyCSProjFile = open(csProjFile + "_copy", "w")
+		csProjLines = openCSProjFile.readlines()
 
-		# replace any line in C# project file that has old tool name, except for nuget package reference or references to application icons
-		if "<PackageReference Include=" not in line and "<ApplicationIcon>" not in line:
-			line = sub('(?i)' + escape(currentToolName), lambda m: theName, line)
+		for line in csProjLines:
+			# replace every project's GUID (handles this project's own GUID and any <ProjectReference> entries to other projects in the solution)
+			for otherProjName, otherNewGUID in projectNameToNewGUID.items():
+				otherOldGUID = projectNameToOldGUID.get(otherProjName)
+				if not otherOldGUID:
+					continue
+				otherCleanOldGUID = otherOldGUID.replace("{", "").replace("}", "")
+				line = line.replace(otherOldGUID, "{" + otherNewGUID + "}").replace(otherCleanOldGUID, otherNewGUID)
 
-		# remove the pdb string options from C# project file
-		line = line.replace("<DebugType>pdbonly</DebugType>", "<DebugType>none</DebugType>").replace("<DebugType>full</DebugType>", "<DebugType>none</DebugType>")
-		openCopyCSProjFile.write(line)
+			# replace any line in C# project file that has old tool name, except for nuget package reference or references to application icons
+			# only do this inside the main project's .csproj, so cross-project references in other projects are not broken
+			if projectName == currentToolName and "<PackageReference Include=" not in line and "<ApplicationIcon>" not in line:
+				line = sub('(?i)' + escape(currentToolName), lambda m: theName, line)
 
-	openCSProjFile.close(), openCopyCSProjFile.close()
-	remove(csProjFile), rename(f"{csProjFile}_copy", csProjFile)
+			# remove the pdb string options from C# project file
+			line = line.replace("<DebugType>pdbonly</DebugType>", "<DebugType>none</DebugType>").replace("<DebugType>full</DebugType>", "<DebugType>none</DebugType>")
+			openCopyCSProjFile.write(line)
 
-	# change the info in the assemblyinfo file for the tool that will be compiled to be new tool name
-	if path.exists(assemblyInfoFile):
+		openCSProjFile.close(), openCopyCSProjFile.close()
+		remove(csProjFile), rename(f"{csProjFile}_copy", csProjFile)
+
+	# change the info in each assemblyinfo file. match each AssemblyInfo.cs to the project it lives under
+	for assemblyInfoFile in assemblyInfoFiles:
+		if not path.exists(assemblyInfoFile):
+			continue
+
+		# find the .csproj whose directory is the deepest parent of this AssemblyInfo.cs
+		projectName = None
+		bestLen = -1
+		normAssembly = assemblyInfoFile.replace("\\", "/")
+		for csProjFile in csProjFiles:
+			normProjDir = path.dirname(csProjFile).replace("\\", "/")
+			if normAssembly.startswith(normProjDir + "/") and len(normProjDir) > bestLen:
+				bestLen = len(normProjDir)
+				projectName = path.basename(csProjFile).replace(".csproj", "")
+
+		if projectName is None or projectName not in projectNameToNewGUID:
+			continue
+
+		oldGUID = projectNameToOldGUID.get(projectName, "f2ca1bb6c7e907d06dafe4687e579fce76b37e4e93b7605022da52e6ccc26fd2")
+		newGUID = projectNameToNewGUID[projectName]
+		tempGUID = oldGUID.replace("{", "").replace("}", "").lower()
+
 		copyfile(assemblyInfoFile, f"{assemblyInfoFile}_copy")
 		openAssemblyInfoFile = open(assemblyInfoFile, 'r')
 		openCopyAssemblyInfoFile = open(f"{assemblyInfoFile}_copy", "w")
 
 		for line in openAssemblyInfoFile.readlines():
-			line = line.replace(currentToolName, theName)
-			tempGUID = currentGUID
-			tempGUID = tempGUID.replace("{", "").replace("}", "").lower()
+			# only replace solution-name occurrences inside the main project's AssemblyInfo
+			if projectName == currentToolName:
+				line = line.replace(currentToolName, theName)
 			line = line.replace(tempGUID, newGUID)
 			openCopyAssemblyInfoFile.write(line)
 
 		openAssemblyInfoFile.close(), openCopyAssemblyInfoFile.close()
 		remove(assemblyInfoFile), rename(f"{assemblyInfoFile}_copy", assemblyInfoFile)
 
-	# rename any directories of files of the current tool name with new one
+	# rename any directories or files of the current tool name with new one (only touches files tied to the main project / solution name)
 	for r, d, f in walk(theDirectory):
 		for file in f:
 			if file == currentToolName + ".sln":
@@ -186,7 +254,7 @@ def replaceGUIDAndToolName(theDirectory: str, theName: str) -> None:
 		rename(currentToolName, theName)
 	chdir(origWorkingDir)
 
-	print(f"\n[+] SUCCESS: New GUID of {newGUID} was generated and replaced in your project")
+	print(f"\n[+] SUCCESS: New GUID(s) were generated and replaced in your project(s)")
 	print(f"[+] SUCCESS: New tool name of {theName} was replaced in project\n")
 
 
