@@ -2,7 +2,7 @@
 Proof-of-concept obfuscation toolkit for C# post-exploitation tools. This will perform the below actions for a C# visual studio project.
 
 * Change the tool name
-* Change the project GUID
+* Change the project GUID (supports multi-project solutions — each `.csproj` gets its own new GUID, and cross-project `<ProjectReference>` entries are updated to match)
 * Obfuscate compatible strings in source code files based on obfuscation method entered by user
 * Removes one-line comments (e.g. // this is a comment)
 * Remove PDB string option for compiled release .NET assembly
@@ -130,7 +130,16 @@ The below table shows the file sizes of 20 popular public C# tools between the u
 
 
 
+## Multi-Project Solution Support
+
+Solutions containing more than one `.csproj` file are fully supported. When run against a multi-project solution:
+
+* A fresh GUID is generated for **each** project in the solution.
+* The `.sln` file is rewritten with the new GUIDs in both the project definition lines and the `GlobalSection(ProjectConfigurationPlatforms)` entries.
+* Each project's `.csproj` is updated with its own new `ProjectGuid`, has its `<DebugType>` set to `none`, and any `<ProjectReference>` entries pointing at sibling projects in the solution are rewritten to use those sibling projects' new GUIDs — so cross-project builds continue to work.
+* Each project's `AssemblyInfo.cs` is matched to its project by directory and has its `[assembly: Guid(...)]` updated.
+* Only the "main" project (the one whose name matches the solution name) is renamed to the new tool name. Secondary projects keep their original names so that cross-project references, namespaces, and types remain intact.
+
 ## Roadmap
 
-* Add support for C# projects with multiple C# project files (multi-project solutions)
 * Obfuscation support for variable names and method names
